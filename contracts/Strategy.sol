@@ -12,52 +12,51 @@ import "@openzeppelin/contracts/math/Math.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 import "../interfaces/IUniswapV2Router02.sol";
-import "../interfaces/ILendingPool.sol";
-
-interface ILendingPoolToken is ILendingPool, IERC20 {}
+import "../interfaces/ISynthetixRewards.sol";
 
 interface IERC20Extended {
     function decimals() external view returns (uint8);
 }
 
+interface IWETH is IERC20 {
+    function deposit() external payable;
+
+    function withdraw(uint256) external;
+}
+
 contract Strategy is BaseStrategy {
     using SafeERC20 for IERC20;
-    using SafeERC20 for ILendingPoolToken;
     using Address for address;
     using SafeMath for uint256;
 
-    struct PoolAlloc {
-        address pool;
-        uint256 alloc;
-    }
-
-    uint256 private constant BASIS_PRECISION = 10000;
-
-    uint256 public minProfit;
-    uint256 public minCredit;
+    //Remove the assignment to fix deployment issue
+    uint256 public minProfit = 0.1 ether;
+    uint256 public minCredit = 1 ether;
 
     //Spookyswap as default
-    IUniswapV2Router02 router = IUniswapV2Router02(0xF491e7B69E4244ad4002BC14e878a34207E38c29);
-    address weth = router.WETH();
+    IUniswapV2Router02 public router = IUniswapV2Router02(0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506);
+    address weth = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
 
-    //This records the current pools and allocs
-    PoolAlloc[] public alloc;
-
+    ISynthetixRewards public pool;
+    IERC20 public reward;
     event Cloned(address indexed clone);
 
-    constructor(address _vault, PoolAlloc[] memory _alloc) public BaseStrategy(_vault) {
-        _initializeStrat(_alloc);
+    constructor(address _vault, address _ethStakePool) public BaseStrategy(_vault) {
+        _initializeStrat(_ethStakePool);
     }
 
-    function _initializeStrat(PoolAlloc[] memory _alloc) internal {
+    receive() external payable {
+        if (msg.sender != weth && msg.value > 0) _depositToWETH(msg.value);
+    }
+
+    function _initializeStrat(address _ethStakePool) internal {
         // You can set these parameters on deployment to whatever you want
         maxReportDelay = 6300;
         profitFactor = 1500;
-        uint256 _decimals = IERC20Extended(address(want)).decimals();
         debtThreshold = 1_000_000 * 1e18;
-        require(checkAllocTotal(_alloc), "Alloc total shouldnt be more than 10000");
-        _setAlloc(_alloc);
-        addApprovals();
+        pool = ISynthetixRewards(_ethStakePool);
+        reward = IERC20(pool.rewardToken());
+        reward.approve(address(router), type(uint256).max);
     }
 
     function initialize(
@@ -65,15 +64,15 @@ contract Strategy is BaseStrategy {
         address _strategist,
         address _rewards,
         address _keeper,
-        PoolAlloc[] memory _alloc
+        address _ethStakePool
     ) external {
         //note: initialise can only be called once. in _initialize in BaseStrategy we have: require(address(want) == address(0), "Strategy already initialized");
         _initialize(_vault, _strategist, _rewards, _keeper);
-        _initializeStrat(_alloc);
+        _initializeStrat(_ethStakePool);
     }
 
-    function cloneStrategy(address _vault, PoolAlloc[] memory _alloc) external returns (address newStrategy) {
-        newStrategy = this.cloneStrategy(_vault, msg.sender, msg.sender, msg.sender, _alloc);
+    function cloneStrategy(address _vault, address _ethStakePool) external returns (address newStrategy) {
+        newStrategy = this.cloneStrategy(_vault, msg.sender, msg.sender, msg.sender, _ethStakePool);
     }
 
     function cloneStrategy(
@@ -81,8 +80,8 @@ contract Strategy is BaseStrategy {
         address _strategist,
         address _rewards,
         address _keeper,
-        PoolAlloc[] memory _alloc
-    ) external returns (address newStrategy) {
+        address _ethStakePool
+    ) external returns (address payable newStrategy) {
         // Copied from https://github.com/optionality/clone-factory/blob/master/contracts/CloneFactory.sol
         bytes20 addressBytes = bytes20(address(this));
 
@@ -95,38 +94,13 @@ contract Strategy is BaseStrategy {
             newStrategy := create(0, clone_code, 0x37)
         }
 
-        Strategy(newStrategy).initialize(_vault, _strategist, _rewards, _keeper, _alloc);
+        Strategy(newStrategy).initialize(_vault, _strategist, _rewards, _keeper, _ethStakePool);
 
         emit Cloned(newStrategy);
     }
 
     function name() external view override returns (string memory) {
-        return "StrategyTarotLender";
-    }
-
-    function WantToBToken(address _pool, uint256 _requiredWant) internal view returns (uint256 _amount) {
-        if (_requiredWant == 0) return _requiredWant;
-        // This gives us the price per share of xToken
-        uint256 pps = ILendingPool(_pool).exchangeRateLast();
-        //Now calculate based on pps
-        _amount = _requiredWant.mul(1e18).div(pps);
-    }
-
-    function BTokenToWant(address _pool, uint256 _bBal) public view returns (uint256 _amount) {
-        if (_bBal == 0) return _bBal;
-        // This gives us the price per share of xToken
-        uint256 pps = ILendingPool(_pool).exchangeRateLast();
-        _amount = (_bBal * pps) / 1e18;
-    }
-
-    function balanceInPool(address _pool) internal view returns (uint256 bal) {
-        bal = BTokenToWant(_pool, ILendingPoolToken(_pool).balanceOf(address(this)));
-    }
-
-    function getTotalInPools() internal view returns (uint256 total) {
-        for (uint256 i = 0; i < alloc.length; i++) {
-            total = total.add(balanceInPool(alloc[i].pool));
-        }
+        return "StrategyETHNyanFarm";
     }
 
     function balanceOfWant() public view returns (uint256) {
@@ -135,16 +109,15 @@ contract Strategy is BaseStrategy {
 
     //Returns staked value
     function balanceOfStake() public view returns (uint256) {
-        return getTotalInPools();
+        return pool.balanceOf(address(this));
     }
 
-    function pendingInterest() public view returns (uint256) {
-        uint256 debt = vault.strategies(address(this)).totalDebt;
-        uint256 LendBal = balanceOfStake();
-        if (debt < LendBal) {
-            //This will add to profit
-            return LendBal.sub(debt);
-        }
+    function pendingReward() public view returns (uint256) {
+        return pool.earned(address(this));
+    }
+
+    function pendingRewardInWant() public view returns (uint256) {
+        return quote(address(reward), address(weth), pendingReward());
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
@@ -157,131 +130,29 @@ contract Strategy is BaseStrategy {
     }
 
     function harvestTrigger(uint256 callCostInWei) public view virtual override returns (bool) {
-        return pendingInterest() > minProfit || vault.creditAvailable() > minCredit;
+        return pendingRewardInWant() > minProfit || vault.creditAvailable() > minCredit;
     }
 
-    function checkAllocTotal(PoolAlloc[] memory _alloc) internal pure returns (bool) {
-        uint256 total = 0;
-        for (uint256 i = 0; i < _alloc.length; i++) {
-            total += _alloc[i].alloc;
-        }
-        return total <= BASIS_PRECISION;
+    function _depositToWETH(uint256 _amountETH) internal {
+        IWETH(weth).deposit{value: _amountETH}();
     }
 
-    function depositToPool(address _pool, uint256 _amount) internal {
-        if (_amount > 0) {
-            want.safeTransfer(_pool, _amount);
-            require(ILendingPoolToken(_pool).mint(address(this)) >= 0, "No lend tokens minted");
-        }
-    }
-
-    function updateExchangeRates() internal {
-        //Update all the rates before harvest
-        for (uint256 i = 0; i < alloc.length; i++) {
-            ILendingPool(alloc[i].pool).exchangeRate();
-        }
-    }
-
-    function calculatePTAmount(address _pool, uint256 _amount) internal returns (uint256 pAmount) {
-        uint256 pBal = ILendingPoolToken(_pool).balanceOf(address(this));
-        pAmount = WantToBToken(_pool, _amount);
-        if (pAmount > pBal) pAmount = pBal;
-    }
-
-    function _withdrawFrom(address _pool) internal {
-        uint256 pAmount = ILendingPoolToken(_pool).balanceOf(address(this));
-        ILendingPoolToken(_pool).safeTransfer(_pool, pAmount);
-        require(ILendingPoolToken(_pool).redeem(address(this)) > 0, "Not enough returned");
-    }
-
-    function withdrawFromPool(address _pool, uint256 _amount) internal {
-        uint256 liqAvail = want.balanceOf(_pool);
-        _amount = Math.min(_amount, liqAvail);
-        uint256 pAmount = calculatePTAmount(_pool, _amount);
-        uint256 returnedAmount;
-        if (pAmount > 0) {
-            //Extra addition on liquidate position to cover edge cases of a few wei defecit
-            ILendingPoolToken(_pool).safeTransfer(_pool, pAmount);
-            returnedAmount = ILendingPoolToken(_pool).redeem(address(this));
-        }
-        if (returnedAmount < _amount) {
-            //Withdraw all and reinvest remaining
-            uint256 toCover = _amount.sub(returnedAmount);
-            pAmount = calculatePTAmount(_pool, _amount);
-            if (pAmount > 0) {
-                ILendingPoolToken(_pool).safeTransfer(_pool, pAmount);
-                require(ILendingPoolToken(_pool).redeem(address(this)) >= toCover, "Not enough returned");
-            }
-        }
+    function _withdrawETH(uint256 _amountETH) internal {
+        IWETH(weth).withdraw(_amountETH);
     }
 
     function _deposit(uint256 _depositAmount) internal {
-        for (uint256 i = 0; i < alloc.length; i++) {
-            depositToPool(alloc[i].pool, calculateAllocFromBal(_depositAmount, alloc[i].alloc));
-        }
+        _withdrawETH(_depositAmount);
+        pool.stake{value: _depositAmount}(0);
     }
 
     function _withdrawAll() internal {
-        for (uint256 i = 0; i < alloc.length; i++) {
-            _withdrawFrom(alloc[i].pool);
-        }
+        pool.withdraw(balanceOfStake());
     }
 
     function _withdraw(uint256 _withdrawAmount) internal {
-        //Update before trying to withdraw
-        updateExchangeRates();
-        for (uint256 i = 0; i < alloc.length; i++) {
-            withdrawFromPool(alloc[i].pool, calculateAllocFromBal(_withdrawAmount, alloc[i].alloc));
-        }
+        pool.withdraw(_withdrawAmount);
     }
-
-    function revokeApprovals() internal {
-        for (uint256 i = 0; i < alloc.length; i++) {
-            if (want.allowance(address(this), alloc[i].pool) > 0) want.approve(alloc[i].pool, 0);
-        }
-    }
-
-    function addApprovals() internal {
-        for (uint256 i = 0; i < alloc.length; i++) {
-            if (want.allowance(address(this), alloc[i].pool) == 0) want.approve(alloc[i].pool, type(uint256).max);
-        }
-    }
-
-    function changeAllocs(PoolAlloc[] memory _newAlloc) external onlyGovernance {
-        // Withdraw from all positions currently allocated
-        if (balanceOfStake() > 0) {
-            _withdrawAll();
-            revokeApprovals();
-        }
-        require(checkAllocTotal(_newAlloc), "Alloc total shouldnt be more than 10000");
-
-        _setAlloc(_newAlloc);
-        addApprovals();
-        _deposit(balanceOfWant());
-    }
-
-    function _setAlloc(PoolAlloc[] memory _newAlloc) internal {
-        //Delete old entries
-        delete alloc;
-        for (uint256 i = 0; i < _newAlloc.length; i++) {
-            alloc.push(PoolAlloc({pool: _newAlloc[i].pool, alloc: _newAlloc[i].alloc}));
-        }
-    }
-
-    function calculateAllocFromBal(uint256 _bal, uint256 _allocPoints) internal pure returns (uint256) {
-        return _bal.mul(_allocPoints).div(BASIS_PRECISION);
-    }
-
-    /*
-    function rebalance() external onlyStrategist {
-        for(uint i=0;i<alloc.length;i++) {
-            uint poolBal = balanceInPool(alloc[i].pool);
-            uint expectedBalance = calculateAllocFromBal(balanceOfStake(), alloc[i].alloc);
-            if(poolBal > expectedBalance) withdrawFromPool(alloc[i].pool, poolBal.sub(expectedBalance));
-            if(poolBal < expectedBalance) depositToPool(alloc[i].pool, Math.min(balanceOfWant(), expectedBalance.sub(poolBal)));
-        }
-    }
-    */
 
     function returnDebtOutstanding(uint256 _debtOutstanding) internal returns (uint256 _debtPayment, uint256 _loss) {
         // We might need to return want to the vault
@@ -292,9 +163,21 @@ contract Strategy is BaseStrategy {
         }
     }
 
+    function swapRewards() internal {
+        uint256 rBal = reward.balanceOf(address(this));
+        if (rBal > 0)
+            router.swapExactTokensForTokens(
+                reward.balanceOf(address(this)),
+                0,
+                getTokenOutPath(address(reward), weth),
+                address(this),
+                block.timestamp
+            );
+    }
+
     function handleProfit() internal returns (uint256 _profit) {
         uint256 balanceOfWantBefore = balanceOfWant();
-        updateExchangeRates();
+        swapRewards();
         _profit = balanceOfWant().sub(balanceOfWantBefore);
     }
 
@@ -308,10 +191,8 @@ contract Strategy is BaseStrategy {
         )
     {
         _profit = handleProfit();
-        uint256 interest = pendingInterest();
         (_debtPayment, _loss) = returnDebtOutstanding(_debtOutstanding);
         uint256 balanceAfter = balanceOfWant();
-        _profit += interest;
         uint256 requiredWantBal = _profit + _debtPayment;
         if (balanceAfter < requiredWantBal) {
             //Withdraw enough to satisfy profit check

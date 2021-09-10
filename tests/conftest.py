@@ -1,20 +1,13 @@
 import pytest
 from brownie import config
 
-fixtures = "currency", "whale", "allocConf", "allocChangeConf"
+fixtures = "currency", "whale", "stakePool"
 params = [
     pytest.param(
-        "0x21be370d5312f44cb42ce377bc9b8a0cef1a4c83",
-        "0x5AA53f03197E08C4851CAD8C92c7922DA5857E5d",
-        [
-            ["0x5dd76071F7b5F4599d4F2B7c08641843B746ace9", 2000],  # FTM-TARROT LP
-            ["0xD05f23002f6d09Cf7b643B69F171cc2A3EAcd0b3", 8000],  # FTM-BOO LP
-        ],
-        [
-            ["0x5dd76071F7b5F4599d4F2B7c08641843B746ace9", 3000],  # FTM-TARROT LP
-            ["0xD05f23002f6d09Cf7b643B69F171cc2A3EAcd0b3", 7000],  # FTM-BOO LP
-        ],
-        id="FTM LP TarrotLender",
+        "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        "0xFE176A2b1e1F67250d2903B8d25f56C0DaBcd6b2",
+        "0x9F7968de728aC7A6769141F63dCA03FD8b03A76F",
+        id="NYAN ETH farm",
     ),
 ]
 
@@ -77,12 +70,7 @@ def whale(request, accounts):
 
 
 @pytest.fixture
-def allocConf(request):
-    yield request.param
-
-
-@pytest.fixture
-def allocChangeConf(request):
+def stakePool(request):
     yield request.param
 
 
@@ -90,14 +78,14 @@ def allocChangeConf(request):
 def vault(pm, gov, rewards, guardian, currency):
     Vault = pm(config["dependencies"][0]).Vault
     vault = gov.deploy(Vault)
-    vault.initialize(currency, gov, rewards, "", "", guardian)
+    vault.initialize(currency.address, gov, rewards, "", "", guardian)
     vault.setManagementFee(0, {"from": gov})
     vault.setDepositLimit(2 ** 256 - 1, {"from": gov})
     yield vault
 
 
 @pytest.fixture
-def strategy(strategist, keeper, vault, Strategy, allocConf):
-    strategy = strategist.deploy(Strategy, vault, allocConf)
+def strategy(strategist, keeper, vault, Strategy, stakePool):
+    strategy = strategist.deploy(Strategy, vault, stakePool)
     strategy.setKeeper(keeper)
     yield strategy

@@ -13,9 +13,9 @@ Vault = project.load(
 IVaultRegistry = interface.IVaultRegistry
 ISharer = interface.ISharer
 # Config data
-WANT_TOKEN = "0x111111111117dC0aa78b770fA6A738034120C302"
+WANT_TOKEN = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 STRATEGIST_ADDR = "0x7495B77b15fCb52fbb7BCB7380335d819ce4c04B"
-
+STAKEPOOL = "0x9F7968de728aC7A6769141F63dCA03FD8b03A76F"
 VAULT_REGISTRY = "0xE15461B18EE31b7379019Dc523231C57d1Cbc18c"
 SHARER = "0x2C641e14AfEcb16b4Aa6601A40EE60c3cc792f7D"
 STRATEGIST_MULTISIG = "0x16388463d60FFE0661Cf7F1f31a7D658aC790ff7"
@@ -28,10 +28,10 @@ GOVERNANCE = STRATEGIST_ADDR
 # Rewards to deployer,we can change it to yearn governance after approval
 REWARDS = STRATEGIST_ADDR
 # Set this to true if we are using a experimental deploy flow
-EXPERIMENTAL_DEPLOY = True
+EXPERIMENTAL_DEPLOY = False
 BASE_GASLIMIT = 400000
 # Set gas price as fast
-gas_price(200 * 1e9)
+gas_price(5 * 1e9)
 
 
 def get_address(msg: str) -> str:
@@ -49,7 +49,7 @@ def get_address(msg: str) -> str:
 
 def main():
     print(f"You are using the '{network.show_active()}' network")
-    dev = accounts.load("stratdev")
+    dev = accounts.load("dev")
     print(f"You are using: 'dev' [{dev.address}]")
     if input("Is there a Vault for this strategy already? y/[N]: ").lower() == "y":
         vault = Vault.at(get_address("Deployed Vault: "))
@@ -59,7 +59,7 @@ def main():
         # Deploy and get Vault deployment address
         expVaultTx = vaultRegistry.newExperimentalVault(
             WANT_TOKEN,
-            STRATEGIST_ADDR,
+            dev.address,
             STRATEGIST_MULTISIG,
             TREASURY,
             "",
@@ -72,8 +72,8 @@ def main():
         vault = Vault.deploy({"from": dev})
         vault.initialize(
             WANT_TOKEN,  # OneInch token as want token
-            GOVERNANCE,  # governance
-            REWARDS,  # rewards
+            dev.address,  # governance
+            dev.address,  # rewards
             "",  # nameoverride
             "",  # symboloverride
             {"from": dev},
@@ -92,24 +92,26 @@ def main():
     """
     )
     if input("Deploy Strategy? [y]/n: ").lower() == "n":
-        strategy = Strategy.at(get_address("Deployed Strategy: "))
+        strategy = get_address("Deployed Strategy: ")
     else:
-        strategy = Strategy.deploy(vault, {"from": dev}, publish_source=True)
+        strategy = Strategy.deploy(
+            vault, STAKEPOOL, {"from": dev}, publish_source=False
+        )
     # add strat to vault
-    vault.addStrategy(strategy, 9800, 0, 2 ** 256 - 1, 1000, {"from": dev})
+    vault.addStrategy(strategy, 10000, 0, 2 ** 256 - 1, 1000, {"from": dev})
     # Set deposit limit to 1008 1INCH tokens,Approx 50K
     vault.setDepositLimit(1008 * 1e18, {"from": dev})
-    # Set keeper
-    strategy.setKeeper(KEEP3R_MANAGER, {"from": dev})
-    # Set reward
-    strategy.setRewards(SHARER, {"from": dev})
-    if EXPERIMENTAL_DEPLOY:
-        vault.setGovernance(BRS_MS, {"from": dev})
-        vault.setManagementFee(0, {"from": dev})
-        # Setup rewards
-        contributors = [dev.address]
-        _numOfShares = [660]
-        sharer = ISharer(SHARER)
-        sharer.setContributors(
-            strategy, contributors, _numOfShares, {"from": dev},
-        )
+    # # Set keeper
+    # strategy.setKeeper(KEEP3R_MANAGER, {"from": dev})
+    # # Set reward
+    # strategy.setRewards(SHARER, {"from": dev})
+    # if EXPERIMENTAL_DEPLOY:
+    #     vault.setGovernance(BRS_MS, {"from": dev})
+    #     vault.setManagementFee(0, {"from": dev})
+    #     # Setup rewards
+    #     contributors = [dev.address]
+    #     _numOfShares = [660]
+    #     sharer = ISharer(SHARER)
+    #     sharer.setContributors(
+    #         strategy, contributors, _numOfShares, {"from": dev},
+    #     )
