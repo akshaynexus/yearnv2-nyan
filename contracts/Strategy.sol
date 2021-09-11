@@ -21,7 +21,7 @@ interface IERC20Extended {
 interface IWETH is IERC20 {
     function deposit() external payable;
 
-    function withdraw(uint256) external;
+    function withdraw(uint) external;
 }
 
 contract Strategy is BaseStrategy {
@@ -30,12 +30,12 @@ contract Strategy is BaseStrategy {
     using SafeMath for uint256;
 
     //Remove the assignment to fix deployment issue
-    uint256 public minProfit = 0.1 ether;
-    uint256 public minCredit = 1 ether;
+    uint256 public minProfit;
+    uint256 public minCredit;
 
     //Spookyswap as default
-    IUniswapV2Router02 public router = IUniswapV2Router02(0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506);
-    address weth = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+    IUniswapV2Router02 public router = IUniswapV2Router02(0xF491e7B69E4244ad4002BC14e878a34207E38c29);
+    address weth = router.WETH();
 
     ISynthetixRewards public pool;
     IERC20 public reward;
@@ -45,9 +45,8 @@ contract Strategy is BaseStrategy {
         _initializeStrat(_ethStakePool);
     }
 
-    receive() external payable {
-        if (msg.sender != weth && msg.value > 0) _depositToWETH(msg.value);
-    }
+    //Allow eth to be sent
+    receive() external payable {}
 
     function _initializeStrat(address _ethStakePool) internal {
         // You can set these parameters on deployment to whatever you want
@@ -109,11 +108,11 @@ contract Strategy is BaseStrategy {
 
     //Returns staked value
     function balanceOfStake() public view returns (uint256) {
-        return pool.balanceOf(address(this));
+        return uint256(pool.balanceOf(address(this)));
     }
 
     function pendingReward() public view returns (uint256) {
-        return pool.earned(address(this));
+        return uint256(pool.earned(address(this)));
     }
 
     function pendingRewardInWant() public view returns (uint256) {
@@ -141,17 +140,19 @@ contract Strategy is BaseStrategy {
         IWETH(weth).withdraw(_amountETH);
     }
 
-    function _deposit(uint256 _depositAmount) internal {
+    function _deposit(uint _depositAmount) internal {
         _withdrawETH(_depositAmount);
-        pool.stake{value: _depositAmount}(0);
+        pool.stake{value: address(this).balance}(0);
     }
 
     function _withdrawAll() internal {
-        pool.withdraw(balanceOfStake());
+        pool.withdraw(uint128(balanceOfStake()));
+        _depositToWETH(address(this).balance);
     }
 
-    function _withdraw(uint256 _withdrawAmount) internal {
+    function _withdraw(uint128 _withdrawAmount) internal {
         pool.withdraw(_withdrawAmount);
+        _depositToWETH(address(this).balance);
     }
 
     function returnDebtOutstanding(uint256 _debtOutstanding) internal returns (uint256 _debtPayment, uint256 _loss) {
@@ -164,6 +165,7 @@ contract Strategy is BaseStrategy {
     }
 
     function swapRewards() internal {
+        pool.getReward();
         uint256 rBal = reward.balanceOf(address(this));
         if (rBal > 0)
             router.swapExactTokensForTokens(
@@ -190,13 +192,13 @@ contract Strategy is BaseStrategy {
             uint256 _debtPayment
         )
     {
-        _profit = handleProfit();
         (_debtPayment, _loss) = returnDebtOutstanding(_debtOutstanding);
+        _profit = handleProfit();
         uint256 balanceAfter = balanceOfWant();
         uint256 requiredWantBal = _profit + _debtPayment;
         if (balanceAfter < requiredWantBal) {
             //Withdraw enough to satisfy profit check
-            _withdraw(requiredWantBal.sub(balanceAfter));
+            _withdraw(uint128(requiredWantBal.sub(balanceAfter)));
         }
     }
 
@@ -221,7 +223,7 @@ contract Strategy is BaseStrategy {
         uint256 balanceStaked = balanceOfStake();
         if (_amountNeeded > balanceWant) {
             uint256 amountToWithdraw = (Math.min(balanceStaked, _amountNeeded - balanceWant));
-            _withdraw(amountToWithdraw);
+            _withdraw(uint128(amountToWithdraw));
         }
         // Since we might free more than needed, let's send back the min
         _liquidatedAmount = Math.min(balanceOfWant(), _amountNeeded);
@@ -244,6 +246,7 @@ contract Strategy is BaseStrategy {
         address _out,
         uint256 _amtIn
     ) internal view returns (uint256) {
+        if(_amtIn ==0) return 0;
         address[] memory path = getTokenOutPath(_in, _out);
         return router.getAmountsOut(_amtIn, path)[path.length - 1];
     }
